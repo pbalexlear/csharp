@@ -649,5 +649,104 @@ namespace k8s.Tests
                 }).ConfigureAwait(false);
             }
         }
+
+        [Fact]
+        public async Task ContinueWatchingThroughInactivity()
+        {
+            try
+            {
+                var eventsReceived = new AsyncCountdownEvent(1);
+                
+
+                var client = new Kubernetes(KubernetesClientConfiguration.BuildConfigFromConfigFile());
+
+                var listTask = await client.ListNamespacedPodWithHttpMessagesAsync("testns", watch: true).ConfigureAwait(false);
+
+                var events = new HashSet<V1Pod>();
+                var errors = 0;
+                var connclosed = 0;
+                var eventcount = 0;
+                var watcher = listTask.Watch<V1Pod, V1PodList>(
+                    (type, item) =>
+                    {
+                        testOutput.WriteLine($"Watcher received '{type}' event.");
+
+                        events.Add(item);
+                        eventsReceived.Signal();
+                    },
+                    error =>
+                    {
+                        testOutput.WriteLine($"Watcher received '{error.GetType().FullName}' error.");
+
+                        errors += 1;
+                        eventsReceived.Signal();
+                    },
+                    () =>
+                    {
+                        connclosed += 1;
+                    });
+
+                var pod1 = GetTestPod("test1");
+                client.CreateNamespacedPod(pod1, "testns");
+
+                // wait server yields all events
+                await Task.WhenAny(eventsReceived.WaitAsync(), Task.Delay(3000)).ConfigureAwait(false);
+
+                // wait for some time to pass before generating another event 
+                await Task.Delay(TimeSpan.FromMinutes(2)).ConfigureAwait(false);
+
+                eventcount = events.Count;
+
+                var pod2 = GetTestPod("test2");
+                client.CreateNamespacedPod(pod2, "testns");
+
+                // Allow 30 seconds for the event to come through
+                await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+
+                // validate that one new event has been recieved after a pause
+                Assert.True(
+                    events.Count == (eventcount + 1),
+                    $"No Events Were Received after Pause Event Count Is {eventcount}");
+
+
+                Assert.Equal(1, errors);
+
+                Assert.True(watcher.Watching);
+                // cleanup after 
+                client.DeleteNamespacedPod("test1", "default");
+
+                client.DeleteNamespacedPod("test2", "default");
+
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+            }
+        }
+
+        private V1Pod GetTestPod(string name)
+        {
+            var containerList = new List<V1Container>();
+            containerList.Add(new V1Container
+            {
+                Image = "busybox",
+                Name = "container",
+            });
+
+            return
+                new V1Pod
+                {
+                    ApiVersion = "v1",
+                    Kind = "Pod",
+                    Spec = new V1PodSpec
+                    {
+                        Containers = containerList,
+                    },
+                    Metadata = new V1ObjectMeta
+                    {
+                        Name = name,
+                    },
+                };
+        }
     }
 }
